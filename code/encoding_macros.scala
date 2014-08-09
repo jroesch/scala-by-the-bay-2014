@@ -1,47 +1,56 @@
-package encoding.macros
-
 import java.nio._
 import charset._
-import scala.reflect.runtime.universe._
 import scala.reflect.macros.blackbox.Context
 import scala.language.experimental.macros
-import shapeless._
 
 /* A set of example encodings */
-sealed trait Encoding 
-sealed trait UTF8 extends Encoding 
-sealed trait ASCII extends Encoding
-sealed trait Binary extends Encoding
-
-object Encoding {
-  def encodingNameForType[E <: Encoding : WeakTypeTag]: String = 
-    weakTypeTag[E].tpe.toString
+sealed trait Encoding {
+  val encodingName: String
 }
 
-object encodingName extends Poly0 {
-  implicit def ascii[E <: ASCII] = at[String]("ASCII")
+sealed trait UTF8 extends Encoding
+case object UTF8 extends UTF8 {
+  val encodingName = "UTF-8"
+}
+
+sealed trait ASCII extends Encoding
+case object ASCII extends ASCII {
+  val encodingName = "ASCII"
+}
+
+sealed trait Binary extends Encoding
+case object Binary extends Binary {
+  val encodingName = "ISO-8859-1"
 }
 
 /* Inteface for an Encoded String */
 trait EncodedString[E <: Encoding] {
+  val encoding: String
   val contents: Array[Byte]
-  override def toString = new String(contents, Encoding.encodingNameForType[E])
+  override def toString = new String(contents, encoding)
+
+  def concat(other: EncodedString[E]): EncodedString[E] = {
+    val that = this
+    new EncodedString[E] {
+      val encoding = that.encoding
+      val contents = that.contents ++ other.contents
+    }
+  }
 }
 
 /* Macro for building encoded literals */
 class StaticEncoding(val c: Context) {
-  def encnameForType[E <: Encoding : c.WeakTypeTag]: String = 
-    weakTypeTag[E].tpe.toString
-
-  def encodeAs[E <: Encoding : c.WeakTypeTag](s : c.Expr[String]): c.Expr[EncodedString[E]] = {
+  def encodeAs[E <: Encoding : c.WeakTypeTag](enc: c.Expr[E], s: c.Expr[String]): c.Expr[EncodedString[E]] = {
     import c.universe._
     s.tree match {
       case Literal(Constant(literal: String)) =>
+        val encoding = getEncoding(enc.tree)
+        val encodingName = encoding.encodingName
         validInEncoding(encoding, literal) match {
           case true =>
             val etpe = weakTypeTag[E].tpe
             val tree = q"""new EncodedString[$etpe] {
-              def encodingName = Encoding.encodingNameForType[$etpe]
+              val encoding = $encodingName
               val contents = $literal.getBytes
             }"""
             c.Expr[EncodedString[E]](tree)
@@ -53,8 +62,8 @@ class StaticEncoding(val c: Context) {
     }
   }
 
-  def validInEncoding(encoding: String, s: String): Boolean = {
-    val charset = Charset.forName(encoding)
+  def validInEncoding(encoding: Encoding, s: String): Boolean = {
+    val charset = Charset.forName(encoding.encodingName)
     val charBuffer = CharBuffer.wrap(s)
     val encoder = charset.newEncoder
     try {
@@ -65,15 +74,19 @@ class StaticEncoding(val c: Context) {
     }
   }
 
-  def getEncoding(name: String): String = name match {
-      case "encoding.macros.UTF8" => "UTF-8"
-      case "encoding.macros.ASCII" => "ASCII"
-      case "encoding.macros.Binary" => "ISO-8859-1"
+  def getEncoding(name: c.Tree): Encoding = {
+    import c.universe._
+
+    name match {
+      case q"UTF8" => UTF8
+      case q"ASCII" => ASCII
+      case q"Binary" => Binary
+    }
   }
 }
 
 object StringEncodingMacros {
-  def staticEncoding[E <: Encoding](s: String) = macro StaticEncoding.encodeAs[E]
+  def staticEncoding[E <: Encoding](enc: E, s: String) = macro StaticEncoding.encodeAs[E]
 }
 
 object Transcode {
@@ -88,6 +101,7 @@ object Transcode {
     type Result = R
     
     def transcode(s: EncodedString[E]) = new EncodedString[Result] {
+      val encoding = "UTF-8"
       val contents = s.contents
     }
   }
@@ -100,19 +114,13 @@ trait Transcode[Initial <: Encoding] {
 }
 
 object Concatable {
-  type Aux[P <: Encoding, S <: Encoding, R  <: Encoding] = Concatable[P, S] { type Result = R }
-
-  def apply[Prefix <: Encoding, Suffix <: Encoding](implicit c: Concatable[Prefix, Suffix]) : Aux[Prefix, Suffix, c.Result] = c
-  
   implicit def concatable[E1 <: Encoding, E2 <: Encoding, R <: Encoding]
   (implicit t1: Transcode.Aux[E1, R], t2: Transcode.Aux[E2, R]) = new Concatable[E1, E2] {
     type Result = R
     def concat(s1: EncodedString[E1], s2: EncodedString[E2]) = {
       val s1p = t1.transcode(s1)
       val s2p = t2.transcode(s2)
-      new EncodedString[R] {
-        val contents = s1p.contents ++ s2p.contents
-      }
+      s1p.concat(s2p)
     }
   }
 }
@@ -123,4 +131,8 @@ trait Concatable[Prefix <: Encoding, Suffix <: Encoding] {
   def concat(s1: EncodedString[Prefix], s2: EncodedString[Suffix]): EncodedString[Result]
 }
 
+object enc {
+  def concat[E1 <: Encoding, E2 <: Encoding](s1: EncodedString[E1], s2: EncodedString[E2])(implicit c: Concatable[E1, E2]) =
+    c.concat(s1, s2)
+}
 
