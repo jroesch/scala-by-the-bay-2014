@@ -2,36 +2,47 @@ import shapeless._
 import tag.@@
 import shapeless.ops.hlist._
 import ops.record._
-import record._
 import syntax.typeable._
 import scala.reflect.runtime.universe._
+import shapeless.tag._
 
 trait SQLBacked[T] {
   type Repr <: HList
   type Keys <: HList
+  type FieldNames <: HList
   
   val className: String
   val tableName: String
   val keys: Keys
+  val fieldNames : List[String]
 
-  implicit val quotableKeys: Mapper[quote.type, this.Keys]
+  def canUpdate[F <: HList](fields: F)(implicit subseq: SubSeq.Aux[F, Repr])
 }
 
 object SQLBacked {
-  def apply[T](implicit sql: SQLBacked[T]): Aux[T, sql.Repr, sql.Keys] = sql
+  def apply[T](implicit sql: SQLBacked[T]): Aux[T, sql.Repr, sql.Keys, sql.FieldNames] = sql
 
-  type Aux[T, R <: HList, K <: HList] = SQLBacked[T] { type Repr = R; type Keys = K }
+  type Aux[T, R <: HList, K <: HList, F <: HList] = SQLBacked[T] { type Repr = R; type Keys = K; type FieldNames = F }
   
   // typeable stuff doesn't work, got to figure out how to stringify keys tomorrow */
-  implicit def sqlbacked[T, R <: HList, O <: HList, C](implicit labelgen: LabelledGeneric.Aux[T, R], ks: Keys.Aux[R, O], ts: ToString[T]) = 
+  implicit def sqlbacked[T, R <: HList, O <: HList, I <: HList](implicit labelgen: LabelledGeneric.Aux[T, R], 
+                                                                ks: Keys.Aux[R, O], 
+                                                                mapper: Mapper.Aux[quote.type, O, I],
+                                                                traversable: ToList[I, String],
+                                                                ts: ToString[T]) = 
     new SQLBacked[T] {
       type Repr = R
       type Keys = O
+      type FieldNames = I
       
       val className = ts.apply
       val tableName = ts.toTableName
       val keys = ks.apply
-      implicit val quotableKeys = null
+      val fieldNames = keys.map(quote).toList
+
+      def canUpdate[F <: HList](fields: F)(implicit subseq: SubSeq.Aux[F, Repr]) = {
+        ???
+      }
   }
 }
 
@@ -71,17 +82,15 @@ trait Quotable[Q] {
   def quote(value: Q): String
 }
 
-trait LowPriorityQuotable {
+object Quotable { //extends LowPriorityQuotable {
+  def apply[Q](implicit q: Quotable[Q]) = q
+  
   implicit object stringQuote extends Quotable[String] {
     def quote(value: String) = value
   }
-}
 
-object Quotable extends LowPriorityQuotable {
-  def apply[Q](implicit q: Quotable[Q]) = q
-  
-  implicit def quoteKey[S](implicit witness: Witness.Aux[S]) = new Quotable[Symbol @@ S] {
-    def quote(value: Symbol @@ S) = "tolo"
+  implicit def symbolQuote[T : Witness.Aux] = new Quotable[T] {
+    def quote(value: T) = value.toString.substring(1)
   }
 }
 
@@ -94,16 +103,17 @@ object SQL {
   //def using[T <: DB]
 
   
-  def table[T](implicit sql: SQLBacked[T]): SQLBacked.Aux[T, sql.Repr, sql.Keys] = sql
+  def table[T](implicit sql: SQLBacked[T]): SQLBacked.Aux[T, sql.Repr, sql.Keys, sql.FieldNames] = sql
   
-  def create[T](implicit sql: SQLBacked[T]) {
-    import sql.quotableKeys
-    
-    s"CREATE TABLE ${table.tableName} (${sql.keys.map(quote)});" //yolo!
-    table.keys
+  def create[T](implicit sql: SQLBacked[T]) = {    
+    s"CREATE TABLE ${table.tableName} (${sql.fieldNames.mkString(", ")});"
   }
   
-  def insert[T: SQLBacked](row: T) = ???
+  def insert[T: SQLBacked](row: T) = {
+    s"INSERT INTO ${table.tableName} (${}) VALUES (${});"
+  }
+
+  def update[T: SQLBacked, F <: HList](fields: F) = ???
 
   def toTableName(name: String) = 
     name.map(_.toLower) + "s"
